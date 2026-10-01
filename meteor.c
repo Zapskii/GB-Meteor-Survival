@@ -21,6 +21,9 @@
 #include <gbdk/console.h>
 
 #include "gfx.h"
+#include <gb/sgb.h>
+#include "sgb_border.h"
+#include "border_data.h"
 
 // ------------------------------------------------------------ tile layout
 // Sprite tiles live at 128+ so they never collide with the BG font that
@@ -31,16 +34,20 @@
 #define T_LARGE    ((uint8_t)(SPR_BASE + 10))   // 4 tiles: TL, TR, BL, BR of a 16x16
 #define T_MEDIUM   ((uint8_t)(SPR_BASE + 14))
 #define T_SMALL    ((uint8_t)(SPR_BASE + 15))
+#define T_DEBRIS   ((uint8_t)(SPR_BASE + 16))   // 2 tiles: ship explosion shards
 
 // ------------------------------------------------------- OAM slot budget
 // 40 sprites total: 1 ship + 4 bullets + 8 rocks * 4 = 37.
 // Each rock owns 4 slots so its sprites never need to be shuffled around;
 // medium/small rocks just use the first and hide the rest.
+// The 3 left over at 37..39 carry the ship's explosion shards, which is why
+// that budget has a hard ceiling: there is nowhere else to take slots from.
 #define MAX_BULLETS  4u
 #define MAX_ROCKS    8u
 #define OAM_SHIP     0u
 #define OAM_BULLET0  1u
 #define OAM_ROCK0    (OAM_BULLET0 + MAX_BULLETS)
+#define OAM_SPARE0   (OAM_ROCK0 + (MAX_ROCKS << 2))   // 37: the last free slots
 
 // --------------------------------------------------------------- tuning
 #define SCREEN_W     160u
@@ -58,6 +65,13 @@
 #define INVULN_FRAMES 120u
 #define RESPAWN_DELAY 90u
 #define START_LIVES  3u
+
+// The ship's death explosion: four shards thrown out on the diagonals.
+// DEBRIS_LIFE must stay under RESPAWN_DELAY, so the shards always clear the
+// ship's OAM slot before it is wanted back.
+#define DEBRIS_MAX   4u
+#define DEBRIS_LIFE  40u
+#define DEBRIS_SPEED 0xE0u      // 8.8; ~0.9 px/frame at the widest dir_tab entry
 
 // Wave ramp. Rock COUNT saturates quickly (the pool is MAX_ROCKS), so the
 // real difficulty lever is speed: this much 8.8 velocity per wave, added on
@@ -116,9 +130,16 @@ typedef struct {
     uint8_t  size;        // ROCK_NONE = slot free
 } Rock;
 
+typedef struct {
+    uint16_t x, y;
+    int16_t  vx, vy;
+    uint8_t  life;        // 0 = slot free
+} Debris;
+
 static Ship   ship;
 static Bullet bullets[MAX_BULLETS];
 static Rock   rocks[MAX_ROCKS];
+static Debris debris[DEBRIS_MAX];
 
 static uint8_t  rot_timer, frame, respawn_timer;
 static uint8_t  wave, lives, hud_dirty;
@@ -291,6 +312,9 @@ static void ship_spawn(void) {
     ship.alive = 1;
     ship.invuln = INVULN_FRAMES;
     rot_timer = 0;
+    // Called both on a fresh game and on every respawn, so this one line covers
+    // the shards of a previous death either way.
+    for (uint8_t i = 0; i < DEBRIS_MAX; i++) debris[i].life = 0;
 }
 
 static void ship_update(uint8_t keys) {
@@ -336,6 +360,51 @@ static void ship_draw(void) {
     set_sprite_prop(OAM_SHIP, prop);
     // centre -> OAM: 8x8 sprite, so -4, then the (8,16) hardware offset
     move_sprite(OAM_SHIP, px(ship.x) + 4u, px(ship.y) + 12u);
+}
+
+// ---------------------------------------------------------------- debris
+// The ship coming apart. Four shards take the ship's own slot plus the three
+// the sprite budget leaves spare, so an explosion costs no new OAM. Slot 0 is
+// only borrowed -- ship_draw() owns it the moment the ship is alive again,
+// which is what the o != OAM_SHIP guard below protects.
+
+static const uint8_t debris_oam[DEBRIS_MAX] = {
+    (uint8_t)OAM_SHIP, (uint8_t)OAM_SPARE0,
+    (uint8_t)(OAM_SPARE0 + 1u), (uint8_t)(OAM_SPARE0 + 2u)
+};
+
+static void ship_explode(void) {
+    for (uint8_t i = 0; i < DEBRIS_MAX; i++) {
+        uint8_t a = (uint8_t)((i << 3) + 4u);        // 4, 12, 20, 28: the diagonals
+        debris[i].x = ship.x;
+        debris[i].y = ship.y;
+        debris[i].vx = scale_dir(DIR_SIN(a), DEBRIS_SPEED);
+        debris[i].vy = scale_dir(DIR_COS(a), DEBRIS_SPEED);
+        debris[i].life = DEBRIS_LIFE;
+    }
+}
+
+static void debris_update(void) {
+    for (uint8_t i = 0; i < DEBRIS_MAX; i++) {
+        Debris *d = &debris[i];
+        if (!d->life) continue;
+        d->x = advance(d->x, d->vx, W_FP);
+        d->y = advance(d->y, d->vy, H_FP);
+        d->life--;
+    }
+}
+
+static void debris_draw(void) {
+    for (uint8_t i = 0; i < DEBRIS_MAX; i++) {
+        uint8_t o = debris_oam[i];
+        if (debris[i].life) {
+            set_sprite_tile(o, (uint8_t)(T_DEBRIS + (i & 1u)));   // two shard shapes, alternating
+            set_sprite_prop(o, 0);
+            move_sprite(o, px(debris[i].x) + 4u, px(debris[i].y) + 12u);
+        } else if (o != OAM_SHIP) {
+            hide(o);            // never slot 0: a live ship would blink out with it
+        }
+    }
 }
 
 // --------------------------------------------------------------- bullets
@@ -506,6 +575,7 @@ static void collide_ship_rocks(void) {
         if (overlap(sx, sy, PXH(rocks[i].x), PXH(rocks[i].y),
                     rock_radius[rocks[i].size] + SHIP_RADIUS)) {
             ship.alive = 0;
+            ship_explode();
             if (lives) lives--;
             respawn_timer = RESPAWN_DELAY;
             hud_dirty |= HUD_LIVES;
@@ -549,6 +619,30 @@ static void title_screen(void) {
     for (uint8_t i = 0; i < 40u; i++) hide(i);
     sfx_silence();
     cls();
+
+    // A rock field around the title, drawn through the game's own path so the
+    // sprite arithmetic lives in exactly one place. One rock per OAM group --
+    // the full MAX_ROCKS, which is the same budget play() uses (8 x 4 slots,
+    // plus ship and bullets, is 37 of 40). Kept out of the text rows, y 48..88.
+    // play() overwrites every slot on entry, so these leave nothing behind.
+    static const uint8_t field[MAX_ROCKS][3] = {
+        //  x,    y,   size
+        {  26,   22,  ROCK_LARGE  },
+        {  66,   14,  ROCK_LARGE  },
+        { 100,   30,  ROCK_MEDIUM },
+        { 136,   20,  ROCK_LARGE  },
+        {  20,  104,  ROCK_LARGE  },
+        {  66,  122,  ROCK_LARGE  },
+        { 110,  106,  ROCK_MEDIUM },
+        { 146,  130,  ROCK_LARGE  },
+    };
+    for (uint8_t i = 0; i < MAX_ROCKS; i++) {
+        rocks[i].size = field[i][2];
+        rocks[i].x = (uint16_t)(field[i][0] << 8);
+        rocks[i].y = (uint16_t)(field[i][1] << 8);
+    }
+    rocks_draw();
+
     gotoxy(2, 6);  printf("METEOR SURVIVAL");
     gotoxy(4, 9);  printf("PRESS START");
 
@@ -595,6 +689,7 @@ static void play(void) {
 
         bullets_update();
         rocks_update();
+        debris_update();
         collide_bullets_rocks();
         collide_ship_rocks();
 
@@ -609,10 +704,24 @@ static void play(void) {
         sfx_frame(n);
 
         ship_draw();
+        debris_draw();       // after ship_draw: the shards take over slot 0 while it burns
         bullets_draw();
         rocks_draw();
         if (hud_dirty) hud_draw();
     }
+}
+
+// Everything that lives in VRAM and has to be there twice: the SGB border
+// below stages its artwork through the same tiles, so this is a function
+// rather than a sequence, and it is called again after the transfer.
+static void gfx_load(void) {
+    font_init();
+    font_set(font_load(font_min));
+    set_sprite_data(SPR_BASE,       9, ship_tiles);     // ship frames
+    set_sprite_data(SPR_BASE + 9u,  7, misc_tiles);     // bullet, rocks
+    set_sprite_data(SPR_BASE + 16u, 2, debris_tiles);   // explosion shards
+    for (uint8_t i = 0; i < MAX_BULLETS; i++)
+        set_sprite_tile(OAM_BULLET0 + i, T_BULLET);     // bullet tile never changes
 }
 
 void main(void) {
@@ -620,17 +729,40 @@ void main(void) {
     BGP_REG  = 0xE4;
 
     sfx_init();
-    font_init();
-    font_set(font_load(font_min));
-
-    set_sprite_data(SPR_BASE,      9, ship_tiles);   // ship frames
-    set_sprite_data(SPR_BASE + 9u, 7, misc_tiles);   // bullet, rocks
-    for (uint8_t i = 0; i < MAX_BULLETS; i++)
-        set_sprite_tile(OAM_BULLET0 + i, T_BULLET);  // bullet tile never changes
+    gfx_load();
 
     SHOW_BKG;
     SHOW_SPRITES;
     DISPLAY_ON;
+
+    // The Super Game Boy border. Three things about where this sits.
+    //
+    // It has to be AFTER DISPLAY_ON: sgb_border.c moves the border by rendering
+    // it and letting the SGB read the screen back, so one sent with the display
+    // off arrives as nothing. Four frames first -- a PAL SNES needs that delay
+    // at startup or the border never appears at all.
+    //
+    // It stages that artwork through the SAME VRAM the font and sprite tiles
+    // came from (set_bkg_data across tiles 0..155, and SPR_BASE is 128), so the
+    // game's own loads are repeated underneath it rather than trusted to
+    // survive it. The title needs no such repair: the transfer clears the
+    // tilemap, but title_screen() cls()es and redraws from scratch anyway.
+    //
+    // All of it is behind sgb_check(), false on a DMG -- which is why the tile
+    // loads above stay outside it and before DISPLAY_ON, where VRAM is safe to
+    // write. An ordinary Game Boy skips this block entirely and boots exactly
+    // as it did before the border existed.
+    for (uint8_t i = 0; i < 4u; i++) vsync();
+    if (sgb_check()) {
+        set_sgb_border((unsigned char *)border_data_tiles,
+                       sizeof(border_data_tiles),
+                       (unsigned char *)border_data_map,
+                       sizeof(border_data_map),
+                       (unsigned char *)border_data_palettes,
+                       sizeof(border_data_palettes));
+
+        gfx_load();     // and again: the transfer just wrote over all of it
+    }
 
     while (1) {
         title_screen();

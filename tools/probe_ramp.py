@@ -18,11 +18,15 @@ import sys
 
 from pyboy import PyBoy
 
-ROCKS = 0xC0E0          # Rock[8]: x u16, y u16, vx i16, vy i16, size u8
-WAVE = 0xC12B
+SHIP = 0xC0B1           # x u16, y u16, vx i16, vy i16, angle, alive, invuln
 SHIP_INVULN = 0xC0BB    # ship.alive is 0xC0BA, .invuln the byte after
+ROCKS = 0xC0E0          # Rock[8]: x u16, y u16, vx i16, vy i16, size u8
+DEBRIS = 0xC128         # Debris[4]: x u16, y u16, vx i16, vy i16, life u8
+WAVE = 0xC14F
 ROCK_STRIDE = 9
+DEBRIS_STRIDE = 9
 MAX_ROCKS = 8
+MAX_DEBRIS = 4
 
 
 def u16(m, a):
@@ -50,8 +54,60 @@ def clear_rocks(m):
         m[ROCKS + i * ROCK_STRIDE + 8] = 0
 
 
+def debris(m):
+    """[(vx, vy)] for every live shard -- the ship's death explosion."""
+    out = []
+    for i in range(MAX_DEBRIS):
+        a = DEBRIS + i * DEBRIS_STRIDE
+        if m[a + 8]:
+            out.append((i16(m, a + 4), i16(m, a + 6)))
+    return out
+
+
+def check_explosion(pyboy, m):
+    """Die on purpose and assert the ship came apart into four shards.
+
+    The shards are spawned on the four diagonals, so their velocities must sum
+    to exactly zero on each axis and be four different directions. That is the
+    part a typo in the angle step would break, and nothing else in the ROM
+    would notice."""
+    for i in range(MAX_DEBRIS):                     # start from a clean slate
+        m[DEBRIS + i * DEBRIS_STRIDE + 8] = 0
+
+    # A large rock exactly on the ship: adist == 0, so the hit is certain.
+    for i in range(MAX_ROCKS):
+        m[ROCKS + i * ROCK_STRIDE + 8] = 0
+    sx, sy = u16(m, SHIP), u16(m, SHIP + 2)
+    for off, val in ((0, sx), (2, sy), (4, 0), (6, 0)):
+        m[ROCKS + off] = val & 0xFF
+        m[ROCKS + off + 1] = val >> 8
+    m[ROCKS + 8] = 3                                # ROCK_LARGE
+    m[SHIP_INVULN] = 0                              # let it die
+
+    pyboy.tick(1, True)
+
+    sh = debris(m)
+    assert len(sh) == MAX_DEBRIS, "ship died but %d/4 shards spawned" % len(sh)
+    assert sum(v for v, _ in sh) == 0, "shards do not mirror on x: %s" % sh
+    assert sum(v for _, v in sh) == 0, "shards do not mirror on y: %s" % sh
+    assert len(set(sh)) == MAX_DEBRIS, "shards repeat a direction: %s" % sh
+    assert not any(v == 0 and w == 0 for v, w in sh), "a shard has no velocity"
+    print("OK: death spawns 4 shards, mirrored on both axes, all distinct")
+
+
 def main():
     rom = sys.argv[1] if len(sys.argv) > 1 else "meteor.gb"
+
+    # The SGB border's one silent failure, and the only part of it checkable
+    # here: PyBoy emulates a DMG, where sgb_check() is false and the whole
+    # border block is skipped, so no amount of ticking ever shows a pixel of
+    # it. What is readable is the header flag -Wm-ys sets. Without it the SGB
+    # throws the border packets away and simply renders nothing the same way.
+    sgb_flag = open(rom, "rb").read()[0x146]
+    assert sgb_flag == 0x03, (
+        "ROM[0x0146] = 0x%02X: -Wm-ys is missing, so the SGB border will "
+        "never appear (silently, on a DMG and in mGBA alike)" % sgb_flag)
+
     pyboy = PyBoy(rom, window="null", sound_emulated=False)
     m = pyboy.memory
 
@@ -78,6 +134,8 @@ def main():
         assert all(s == 3 for s in sizes), "expected only large rocks, got %s" % sizes
         clear_rocks(m)
         pyboy.tick(6, True)                   # let play() see the clear and respawn
+
+    check_explosion(pyboy, m)
 
     pyboy.stop(save=False)
 
