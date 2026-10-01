@@ -1,6 +1,7 @@
 # Meteor Survival build.
 #   make          build meteor.gb  (GBDK if GBDK_HOME is set, else Docker)
 #   make gfx      regenerate gfx.h from gen_gfx.py
+#   make probe    headless PyBoy check of the wave ramp (implies sym)
 #   make usage    ROM/RAM headroom
 #   make image    build the gbdk-dev Docker image used when GBDK_HOME is absent
 #   make clean
@@ -41,6 +42,16 @@ meteor.gb: meteor.c gfx.h
 sym: meteor.c gfx.h
 	$(RUN) $(LCC) $(CFLAGS) -debug -o meteor.gb meteor.c
 
+# PyBoy lives in a venv, not on PATH (and not in this repo), so fall back to
+# the one GB-Protector keeps:   make probe PY=python3
+PY ?= $(firstword $(wildcard .venv/bin/python ../GB-Protector/.venv/bin/python) python3)
+
+# Headless check of the wave ramp. Needs the -debug ROM, because the probe reads
+# the game's own statics (wave, rocks) by address out of meteor.noi -- a release
+# build's map has no statics. Dev-only; nothing in the build depends on it.
+probe: sym
+	$(PY) tools/probe_ramp.py meteor.gb
+
 # Regenerate placeholder art (or replace gfx.h with your own tiles, same layout)
 gfx:
 	python3 gen_gfx.py
@@ -54,6 +65,6 @@ image:
 clean:
 	rm -f meteor.gb *.lst *.map *.sym *.noi *.asm *.ihx *.o *.rel *.adb *.cdb
 
-.PHONY: all sym gfx usage image clean
+.PHONY: all sym probe gfx usage image clean
 
 all: meteor.gb
