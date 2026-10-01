@@ -59,6 +59,13 @@
 #define RESPAWN_DELAY 90u
 #define START_LIVES  3u
 
+// Wave ramp. Rock COUNT saturates quickly (the pool is MAX_ROCKS), so the
+// real difficulty lever is speed: this much 8.8 velocity per wave, added on
+// top of the per-size table, capped so late waves stay playable. Large rocks
+// start at 0.125-0.25 px/frame and the ship tops out at 1.5, so there is room.
+#define WAVE_SPEED_STEP 0x10u   // 0.0625 px/frame per wave
+#define ROCK_SPEED_MAX  0xE0u   // ceiling for the summed velocity (8.8)
+
 // hud_dirty bit flags
 #define HUD_SCORE    1u
 #define HUD_LIVES    2u
@@ -386,9 +393,13 @@ static uint8_t rocks_alive(void) {
 
 static void rock_randomize_velocity(Rock *r) {
     uint8_t a  = rand() & ANGLE_MASK;
-    uint8_t sp = rock_speed_min[r->size] + (rand() % rock_speed_rng[r->size]);
-    r->vx = scale_dir(DIR_SIN(a), sp);
-    r->vy = scale_dir(DIR_COS(a), sp);
+    // size table picks the base speed, the wave adds the ramp
+    uint16_t sp = (uint16_t)rock_speed_min[r->size] +
+                  (rand() % rock_speed_rng[r->size]) +
+                  (uint16_t)(wave - 1u) * WAVE_SPEED_STEP;
+    if (sp > ROCK_SPEED_MAX) sp = ROCK_SPEED_MAX;
+    r->vx = scale_dir(DIR_SIN(a), (uint8_t)sp);
+    r->vy = scale_dir(DIR_COS(a), (uint8_t)sp);
 }
 
 static void rock_spawn(uint16_t x, uint16_t y, uint8_t size) {
@@ -589,8 +600,10 @@ static void play(void) {
 
         uint8_t n = rocks_alive();
         if (n == 0) {                             // wave cleared
-            if (wave < 3u) wave++;                // 3, 4, 5 large rocks, then it plateaus
-            spawn_wave(2u + wave);
+            if (wave < 255u) wave++;              // never wraps back to an easy wave
+            uint16_t want = 2u + wave;            // 3, 4, 5, ... up to the pool size
+            if (want > MAX_ROCKS) want = MAX_ROCKS;
+            spawn_wave((uint8_t)want);
             n = rocks_alive();
         }
         sfx_frame(n);
