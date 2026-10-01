@@ -8,6 +8,8 @@ installed.
 
 Controls: **LEFT/RIGHT** rotate, **A** thrust, **B** fire, **START** begins.
 
+**[Download `meteor.gb`](https://github.com/Zapskii/Meteor-Survival/releases/latest)**
+
 ## Build
 
     make          # meteor.gb
@@ -95,4 +97,6 @@ sibling projects do, is what would enable one.
 ## Release
 
 The ROM is never committed — `*.gb`, the linker map and the object files are all
-gitignored. Attach a built `meteor.gb` to a release instead.
+gitignored — so a release asset is the only way to get a playable build.
+**[v1.0](https://github.com/Zapskii/Meteor-Survival/releases/tag/v1.0)** carries a
+built `meteor.gb`, ready for a flash cart or an emulator.
