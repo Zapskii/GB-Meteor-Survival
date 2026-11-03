@@ -1,4 +1,4 @@
-[Play online at retro.zapski.com](https://retro.zapski.com)
+🎮 [Play online](https://retro.zapski.com/play/meteor-survival) · [retro.zapski.com](https://retro.zapski.com)
 
 # Meteor Survival
 
